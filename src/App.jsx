@@ -433,7 +433,7 @@ function Rosa({ state, persist, onOpen }) {
     persist({ ...state, players: [...state.players, {
       id: uid(), name: name.trim(), number: num.trim(), role: role.trim(),
       birth: "", foot: "", height: "", weight: "", shoe: "",
-      cardNumber: "", federations: [], idDocument: "",
+      cardNumbers: {}, federations: [], idDocument: "",
       status: "disponibile", statusNote: "", returnDate: "",
       notes: "", strengths: "", goals: "",
     }] });
@@ -517,10 +517,18 @@ function Rosa({ state, persist, onOpen }) {
 // ─── Scheda tecnica ─────────────────────────────────────────────────
 function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
   const [f, setF] = useState(() => {
-    // compatibilità: converte il vecchio campo singolo "federation" in "federations"
+    // compatibilità con vecchi dati
     const base = { ...player };
     if (!Array.isArray(base.federations)) {
       base.federations = base.federation ? [base.federation] : [];
+    }
+    if (!base.cardNumbers || typeof base.cardNumbers !== "object") {
+      base.cardNumbers = {};
+      // se esisteva un numero unico, lo assegno al primo ente (o lo tengo a parte)
+      if (base.cardNumber) {
+        if (base.federations.length > 0) base.cardNumbers[base.federations[0]] = base.cardNumber;
+        else base.cardNumbers["_"] = base.cardNumber;
+      }
     }
     return base;
   });
@@ -591,8 +599,6 @@ function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
               placeholder="es. 42" />
           </div>
         </div>
-        <Field label="N° tessera" value={f.cardNumber} onChange={(v) => set("cardNumber", v)}
-          placeholder="Numero di tessera" />
         <Field label="N° documento d'identità" value={f.idDocument}
           onChange={(v) => set("idDocument", v)}
           placeholder="Carta d'identità / passaporto" />
@@ -624,6 +630,26 @@ function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
             })}
           </div>
         </label>
+
+        {(f.federations || []).length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={fieldLabel}>N° tessera per ente</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {(f.federations || []).map((fed) => (
+                <div key={fed} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ width: 74, flexShrink: 0, fontSize: 13, fontWeight: 600,
+                    color: C.lime }}>{fed}</span>
+                  <input
+                    value={(f.cardNumbers && f.cardNumbers[fed]) || ""}
+                    onChange={(e) => set("cardNumbers",
+                      { ...(f.cardNumbers || {}), [fed]: e.target.value })}
+                    placeholder="Numero di tessera"
+                    style={{ ...inp, flex: 1 }} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <SectionTitle>Disponibilità</SectionTitle>
@@ -780,6 +806,21 @@ function Presenze({ state, persist, team }) {
 }
 
 // ─── Distinta di gara ───────────────────────────────────────────────
+// Numero di tessera dell'atleta: per l'ente-gara se indicato, altrimenti sintesi
+function playerFeds(p) {
+  return p.federations || (p.federation ? [p.federation] : []);
+}
+function cardFor(p, gameFed) {
+  const cn = p.cardNumbers || {};
+  if (gameFed) return cn[gameFed] || "";
+  // nessun ente-gara: se c'è un solo numero mostralo, altrimenti elenca "ENTE: num"
+  const feds = playerFeds(p);
+  const entries = feds.filter((fed) => cn[fed]).map((fed) => `${fed}: ${cn[fed]}`);
+  if (entries.length === 0) return cn["_"] || "";
+  if (entries.length === 1) return cn[feds.find((fed) => cn[fed])];
+  return entries.join(" · ");
+}
+
 function DistintaModal({ session, players, team, onClose }) {
   // pre-seleziona i convocati (segnati "presente")
   const [selected, setSelected] = useState(() => {
@@ -857,7 +898,7 @@ function DistintaModal({ session, players, team, onClose }) {
                     whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     {p.name}</span>
                   <span style={{ color: notInFed ? C.clay : C.muted, fontSize: 12 }}>
-                    {p.cardNumber ? `Tessera ${p.cardNumber}` : "Tessera —"}
+                    {cardFor(p, gameFed) ? `Tessera ${cardFor(p, gameFed)}` : "Tessera —"}
                     {feds.length ? ` · ${feds.join(", ")}` : " · nessun ente"}
                     {notInFed ? ` · non ${gameFed}` : ""}
                   </span>
@@ -894,7 +935,7 @@ function generateDistinta(session, chosen, team, gameFed) {
     <td class="c">${esc(p.number)}</td>
     <td>${esc(p.name)}</td>
     <td class="c">${esc(p.birth)}</td>
-    <td class="c">${esc(p.cardNumber)}</td>
+    <td class="c">${esc(cardFor(p, gameFed))}</td>
     <td class="c">${esc(fedCell(p))}</td>
     <td class="c">${esc(p.idDocument)}</td>
     <td></td>
