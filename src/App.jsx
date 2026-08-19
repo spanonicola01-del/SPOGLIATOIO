@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Users, ClipboardList, CalendarCheck, Plus, Trash2, ChevronLeft, Check, X, Minus, Save, LogOut, Download, Upload, BarChart3, Clock, Trophy, Timer, ClipboardPen, GripVertical } from "lucide-react";
+import { Users, ClipboardList, CalendarCheck, Plus, Trash2, ChevronLeft, Check, X, Minus, Save, LogOut, Download, Upload, BarChart3, Clock, Trophy, Timer, ClipboardPen, GripVertical, AlertTriangle, FileText } from "lucide-react";
 
 // ─── Palette: campo da gioco notturno ───────────────────────────────
 const C = {
@@ -20,6 +20,9 @@ const teamKey = (coachId, teamId) => `coach:team:${coachId}:${teamId}:v2`;
 
 const emptyTeam = { players: [], sessions: [] };
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// Enti di tesseramento supportati
+const FEDERATIONS = ["C.S.I.", "C.S.E.N.", "A.I.C.S.", "F.I.G.C."];
 
 // ─── Backup completo: raccoglie allenatori, squadre e i dati di ogni team ─
 async function buildBackup() {
@@ -380,7 +383,7 @@ function TeamApp({ coach, team, onLogout, onSwitchTeam }) {
         ) : tab === "rosa" ? (
           <Rosa state={state} persist={persist} onOpen={setOpenPlayer} />
         ) : tab === "presenze" ? (
-          <Presenze state={state} persist={persist} />
+          <Presenze state={state} persist={persist} team={team} />
         ) : (
           <Statistiche state={state} coach={coach} team={team} onOpen={(id) => setOpenPlayer(id)} />
         )}
@@ -429,7 +432,10 @@ function Rosa({ state, persist, onOpen }) {
     if (!name.trim()) return;
     persist({ ...state, players: [...state.players, {
       id: uid(), name: name.trim(), number: num.trim(), role: role.trim(),
-      birth: "", foot: "", notes: "", strengths: "", goals: "",
+      birth: "", foot: "", height: "", weight: "", shoe: "",
+      cardNumber: "", federations: [], idDocument: "",
+      status: "disponibile", statusNote: "", returnDate: "",
+      notes: "", strengths: "", goals: "",
     }] });
     setName(""); setNum(""); setRole("");
   };
@@ -443,6 +449,7 @@ function Rosa({ state, persist, onOpen }) {
 
   return (
     <div style={{ paddingTop: 20 }}>
+      <AbsenceAlert alerts={absenceAlerts(state.players, state.sessions)} onOpen={onOpen} />
       <SectionTitle>Aggiungi atleta</SectionTitle>
       <div style={cardWrap}>
         <input value={name} onChange={(e) => setName(e.target.value)}
@@ -467,13 +474,28 @@ function Rosa({ state, persist, onOpen }) {
         <div style={{ display: "grid", gap: 10 }}>
           {state.players.map((p) => {
             const att = attendanceFor(p.id);
+            const wa = weeklyAbsences(p.id, state.sessions);
+            const flagged = wa > ABSENCE_ALERT_THRESHOLD;
             return (
-              <button key={p.id} onClick={() => onOpen(p.id)} style={rowCard}>
+              <button key={p.id} onClick={() => onOpen(p.id)}
+                style={{ ...rowCard, borderColor: flagged ? C.clay : C.line }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
                   <div style={jersey}>{p.number || "–"}</div>
                   <div style={{ textAlign: "left" }}>
-                    <div style={{ fontWeight: 600, fontSize: 16 }}>{p.name}</div>
-                    <div style={{ color: C.muted, fontSize: 13 }}>{p.role || "Ruolo non impostato"}</div>
+                    <div style={{ fontWeight: 600, fontSize: 16, display: "flex",
+                      alignItems: "center", gap: 7 }}>
+                      {p.name}
+                      {flagged && <AlertTriangle size={14} color={C.clay} />}
+                    </div>
+                    <div style={{ color: C.muted, fontSize: 13, display: "flex",
+                      alignItems: "center", gap: 6 }}>
+                      {(p.status && p.status !== "disponibile") && (
+                        <span title={statusMeta(p.status).label} style={{ width: 8, height: 8,
+                          borderRadius: "50%", background: statusMeta(p.status).color,
+                          flexShrink: 0 }} />
+                      )}
+                      {p.role || "Ruolo non impostato"}
+                    </div>
                   </div>
                 </div>
                 {att !== null && (
@@ -494,7 +516,14 @@ function Rosa({ state, persist, onOpen }) {
 
 // ─── Scheda tecnica ─────────────────────────────────────────────────
 function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
-  const [f, setF] = useState(player);
+  const [f, setF] = useState(() => {
+    // compatibilità: converte il vecchio campo singolo "federation" in "federations"
+    const base = { ...player };
+    if (!Array.isArray(base.federations)) {
+      base.federations = base.federation ? [base.federation] : [];
+    }
+    return base;
+  });
   const [dirty, setDirty] = useState(false);
   const set = (k, v) => { setF((p) => ({ ...p, [k]: v })); setDirty(true); };
   const save = () => { onSave(f); setDirty(false); };
@@ -507,10 +536,23 @@ function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 22 }}>
         <div style={{ ...jersey, width: 56, height: 56, fontSize: 22 }}>{f.number || "–"}</div>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24,
             letterSpacing: "-0.02em" }}>{f.name}</div>
           <div style={{ color: C.muted, fontSize: 14 }}>{f.role || "Ruolo non impostato"}</div>
+          {(f.status && f.status !== "disponibile") && (
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8,
+              background: `${statusMeta(f.status).color}22`,
+              border: `1px solid ${statusMeta(f.status).color}`, borderRadius: 8,
+              padding: "3px 10px" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%",
+                background: statusMeta(f.status).color }} />
+              <span style={{ fontSize: 13, fontWeight: 600, color: statusMeta(f.status).color }}>
+                {statusMeta(f.status).label}
+                {f.returnDate ? ` · rientro ${f.returnDate}` : ""}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -535,6 +577,84 @@ function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
         <Field label="Ruolo" value={f.role} onChange={(v) => set("role", v)} />
         <Field label="Nato il" value={f.birth} onChange={(v) => set("birth", v)} placeholder="gg/mm/aaaa" />
         <Field label="Piede" value={f.foot} onChange={(v) => set("foot", v)} placeholder="dx / sx / ambi" />
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <Field label="Altezza (cm)" value={f.height} onChange={(v) => set("height", v)}
+              placeholder="es. 172" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field label="Peso (kg)" value={f.weight} onChange={(v) => set("weight", v)}
+              placeholder="es. 65" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field label="Scarpe (n°)" value={f.shoe} onChange={(v) => set("shoe", v)}
+              placeholder="es. 42" />
+          </div>
+        </div>
+        <Field label="N° tessera" value={f.cardNumber} onChange={(v) => set("cardNumber", v)}
+          placeholder="Numero di tessera" />
+        <Field label="N° documento d'identità" value={f.idDocument}
+          onChange={(v) => set("idDocument", v)}
+          placeholder="Carta d'identità / passaporto" />
+        <label style={{ display: "block" }}>
+          <div style={fieldLabel}>Enti di tesseramento (uno o più)</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {FEDERATIONS.map((fed) => {
+              const list = f.federations || [];
+              const active = list.includes(fed);
+              return (
+                <button key={fed}
+                  onClick={() => set("federations", active
+                    ? list.filter((x) => x !== fed)
+                    : [...list, fed])}
+                  style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 12px",
+                    borderRadius: 10, fontWeight: 600, fontSize: 13,
+                    background: active ? C.lime : "transparent",
+                    color: active ? C.pitchDeep : C.chalk,
+                    border: `1px solid ${active ? C.lime : C.line}`, transition: "all .15s" }}>
+                  <span style={{ width: 16, height: 16, borderRadius: 5, flexShrink: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: active ? C.pitchDeep : "transparent",
+                    border: `1px solid ${active ? C.pitchDeep : C.muted}` }}>
+                    {active && <Check size={12} strokeWidth={3} color={C.lime} />}
+                  </span>
+                  {fed}
+                </button>
+              );
+            })}
+          </div>
+        </label>
+      </div>
+
+      <SectionTitle>Disponibilità</SectionTitle>
+      <div style={cardWrap}>
+        <div style={{ display: "flex", gap: 8, marginBottom: (f.status && f.status !== "disponibile") ? 14 : 0 }}>
+          {[
+            { k: "disponibile", label: "Disponibile", color: C.lime },
+            { k: "recupero", label: "In recupero", color: C.amber },
+            { k: "infortunato", label: "Infortunato", color: C.clay },
+          ].map((o) => {
+            const active = (f.status || "disponibile") === o.k;
+            return (
+              <button key={o.k} onClick={() => set("status", o.k)}
+                style={{ flex: 1, padding: "10px 6px", borderRadius: 10, fontWeight: 600,
+                  fontSize: 13, background: active ? o.color : "transparent",
+                  color: active ? C.pitchDeep : C.chalk,
+                  border: `1px solid ${active ? o.color : C.line}`, transition: "all .15s" }}>
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+        {f.status && f.status !== "disponibile" && (
+          <>
+            <Field label="Rientro previsto" value={f.returnDate}
+              onChange={(v) => set("returnDate", v)} placeholder="gg/mm/aaaa" />
+            <Area label="Nota (tipo di infortunio, terapia…)" value={f.statusNote}
+              onChange={(v) => set("statusNote", v)}
+              placeholder="Es. distorsione caviglia dx, fisioterapia in corso" />
+          </>
+        )}
       </div>
 
       <SectionTitle>Scheda tecnica</SectionTitle>
@@ -559,7 +679,7 @@ function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
 }
 
 // ─── Presenze ───────────────────────────────────────────────────────
-function Presenze({ state, persist }) {
+function Presenze({ state, persist, team }) {
   const [type, setType] = useState("allenamento");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [open, setOpen] = useState(null);
@@ -583,7 +703,7 @@ function Presenze({ state, persist }) {
     sessions: state.sessions.filter((s) => s.id !== sid) }); setOpen(null); };
 
   if (session) {
-    return <SessionDetail session={session} players={state.players}
+    return <SessionDetail session={session} players={state.players} team={team}
       onBack={() => setOpen(null)} onRecord={setRecord} onMinutes={setMinutes}
       onPatch={patchSession} onDelete={removeSession} />;
   }
@@ -659,9 +779,188 @@ function Presenze({ state, persist }) {
   );
 }
 
-function SessionDetail({ session, players, onBack, onRecord, onMinutes, onPatch, onDelete }) {
+// ─── Distinta di gara ───────────────────────────────────────────────
+function DistintaModal({ session, players, team, onClose }) {
+  // pre-seleziona i convocati (segnati "presente")
+  const [selected, setSelected] = useState(() => {
+    const init = {};
+    players.forEach((p) => { if (session.records[p.id] === "presente") init[p.id] = true; });
+    return init;
+  });
+  const [gameFed, setGameFed] = useState(""); // ente della gara (opzionale)
+  const toggle = (id) => setSelected((s) => ({ ...s, [id]: !s[id] }));
+  const chosen = players.filter((p) => selected[p.id]);
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+      display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.pitch,
+        borderTop: `1px solid ${C.line}`, borderRadius: "18px 18px 0 0", width: "100%",
+        maxWidth: 760, maxHeight: "85vh", display: "flex", flexDirection: "column",
+        padding: "20px 16px calc(16px + env(safe-area-inset-bottom))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+          marginBottom: 14 }}>
+          <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 19 }}>
+            Distinta gara
+          </div>
+          <button onClick={onClose} style={{ ...tinyBtn, width: 34, height: 34 }}><X size={17} /></button>
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={fieldLabel}>Ente della gara (opzionale)</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            <button onClick={() => setGameFed("")}
+              style={{ padding: "7px 11px", borderRadius: 9, fontWeight: 600, fontSize: 12,
+                background: gameFed === "" ? C.lime : "transparent",
+                color: gameFed === "" ? C.pitchDeep : C.chalk,
+                border: `1px solid ${gameFed === "" ? C.lime : C.line}` }}>
+              Tutti
+            </button>
+            {FEDERATIONS.map((fed) => (
+              <button key={fed} onClick={() => setGameFed(fed)}
+                style={{ padding: "7px 11px", borderRadius: 9, fontWeight: 600, fontSize: 12,
+                  background: gameFed === fed ? C.lime : "transparent",
+                  color: gameFed === fed ? C.pitchDeep : C.chalk,
+                  border: `1px solid ${gameFed === fed ? C.lime : C.line}` }}>
+                {fed}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ color: C.muted, fontSize: 13, marginBottom: 14 }}>
+          Seleziona i convocati. {gameFed
+            ? `Chi non è tesserato ${gameFed} è segnalato in rosso.`
+            : "Verranno inclusi nome, n° maglia, tessera ed enti."}
+        </div>
+
+        <div style={{ overflowY: "auto", flex: 1, display: "grid", gap: 8, marginBottom: 14 }}>
+          {players.map((p) => {
+            const on = !!selected[p.id];
+            const injured = p.status && p.status !== "disponibile";
+            const feds = p.federations || (p.federation ? [p.federation] : []);
+            const notInFed = gameFed && on && !feds.includes(gameFed);
+            return (
+              <button key={p.id} onClick={() => toggle(p.id)}
+                style={{ display: "flex", alignItems: "center", gap: 12, background: C.surface,
+                  border: `1px solid ${notInFed ? C.clay : (on ? C.lime : C.line)}`, borderRadius: 11,
+                  padding: "10px 12px", width: "100%", textAlign: "left" }}>
+                <span style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: on ? C.lime : "transparent",
+                  border: `1px solid ${on ? C.lime : C.muted}` }}>
+                  {on && <Check size={15} strokeWidth={3} color={C.pitchDeep} />}
+                </span>
+                <span style={{ ...jersey, width: 30, height: 30, fontSize: 12 }}>{p.number || "–"}</span>
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14, display: "block",
+                    whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {p.name}</span>
+                  <span style={{ color: notInFed ? C.clay : C.muted, fontSize: 12 }}>
+                    {p.cardNumber ? `Tessera ${p.cardNumber}` : "Tessera —"}
+                    {feds.length ? ` · ${feds.join(", ")}` : " · nessun ente"}
+                    {notInFed ? ` · non ${gameFed}` : ""}
+                  </span>
+                </span>
+                {injured && <AlertTriangle size={15} color={C.clay} />}
+              </button>
+            );
+          })}
+        </div>
+
+        <button onClick={() => generateDistinta(session, chosen, team, gameFed)}
+          disabled={chosen.length === 0}
+          style={{ ...primaryBtn, width: "100%", justifyContent: "center",
+            opacity: chosen.length === 0 ? 0.45 : 1 }}>
+          <FileText size={17} /> Stampa distinta ({chosen.length})
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function generateDistinta(session, chosen, team, gameFed) {
+  const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  // ente da mostrare per l'atleta: se c'è un ente-gara e l'atleta lo ha, mostra quello;
+  // altrimenti l'elenco dei suoi enti
+  const fedCell = (p) => {
+    const feds = p.federations || (p.federation ? [p.federation] : []);
+    if (gameFed) return feds.includes(gameFed) ? gameFed : "—";
+    return feds.join(", ");
+  };
+  const rows = chosen.map((p, i) => `<tr>
+    <td class="c">${i + 1}</td>
+    <td class="c">${esc(p.number)}</td>
+    <td>${esc(p.name)}</td>
+    <td class="c">${esc(p.birth)}</td>
+    <td class="c">${esc(p.cardNumber)}</td>
+    <td class="c">${esc(fedCell(p))}</td>
+    <td class="c">${esc(p.idDocument)}</td>
+    <td></td>
+  </tr>`).join("");
+  const blanks = Math.max(0, 18 - chosen.length);
+  const emptyRows = Array.from({ length: blanks }).map((_, i) => `<tr>
+    <td class="c">${chosen.length + i + 1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+  </tr>`).join("");
+
+  const html = `<!doctype html><html><head><meta charset="utf-8">
+  <title>Distinta ${esc(team?.name)}</title>
+  <style>
+    body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:26px;color:#0B2E24}
+    h1{font-size:20px;margin:0}
+    .head{display:flex;justify-content:space-between;align-items:flex-end;
+      border-bottom:2px solid #0B2E24;padding-bottom:10px;margin-bottom:6px}
+    .meta{font-size:13px;color:#333;margin:10px 0 16px;line-height:1.7}
+    .meta b{color:#0B2E24}
+    table{border-collapse:collapse;width:100%;font-size:12px;margin-top:6px}
+    th,td{border:1px solid #b9ccc3;padding:6px 8px}
+    th{background:#0B2E24;color:#fff;font-weight:600;text-align:left}
+    td.c,th.c{text-align:center}
+    .sign{display:flex;justify-content:space-between;margin-top:34px;font-size:13px}
+    .sign div{width:45%;border-top:1px solid #333;padding-top:6px;text-align:center;color:#333}
+    @media print{body{padding:0}}
+  </style></head><body>
+    <div class="head">
+      <div>
+        <h1>Distinta di gara</h1>
+        <div style="font-size:14px;margin-top:4px">${esc(team?.name) || ""}</div>
+      </div>
+      <div style="text-align:right;font-size:13px">
+        <div><b>Data:</b> ${fmtShort(session.date)}</div>
+        ${session.opponent ? `<div><b>Avversario:</b> ${esc(session.opponent)}</div>` : ""}
+        ${gameFed ? `<div><b>Ente:</b> ${esc(gameFed)}</div>` : ""}
+      </div>
+    </div>
+    <div class="meta">
+      <b>Società:</b> _______________________________&nbsp;&nbsp;
+      <b>Categoria:</b> _______________________________<br>
+      <b>Dirigente accompagnatore:</b> _______________________________&nbsp;&nbsp;
+      <b>Allenatore:</b> _______________________________
+    </div>
+    <table>
+      <thead><tr>
+        <th class="c">#</th><th class="c">Maglia</th><th>Cognome e nome</th>
+        <th class="c">Nato il</th><th class="c">N° tessera</th><th class="c">Ente</th>
+        <th class="c">Documento</th><th>Firma</th>
+      </tr></thead>
+      <tbody>${rows}${emptyRows}</tbody>
+    </table>
+    <div class="sign">
+      <div>Il Dirigente</div>
+      <div>L'Arbitro</div>
+    </div>
+    <script>window.onload=()=>window.print()</script>
+  </body></html>`;
+  const w = window.open("", "_blank");
+  if (w) { w.document.write(html); w.document.close(); }
+  else alert("Consenti le finestre pop-up per stampare la distinta.");
+}
+
+function SessionDetail({ session, players, team, onBack, onRecord, onMinutes, onPatch, onDelete }) {
   const isMatch = session.type === "partita";
   const [view, setView] = useState("presenze"); // presenze | lavoro
+  const [distintaOpen, setDistintaOpen] = useState(false);
   const opts = [
     { k: "presente", full: "Presente", color: C.lime, icon: <Check size={16} strokeWidth={3} /> },
     { k: "assente", full: "Assente", color: C.clay, icon: <X size={16} strokeWidth={3} /> },
@@ -686,7 +985,16 @@ function SessionDetail({ session, players, onBack, onRecord, onMinutes, onPatch,
           <input value={session.opponent}
             onChange={(e) => onPatch(session.id, { opponent: e.target.value })}
             placeholder="Squadra avversaria" style={inp} />
+          <button onClick={() => setDistintaOpen(true)}
+            style={{ ...outlineBtn, width: "100%", justifyContent: "center", marginTop: 10 }}>
+            <FileText size={17} /> Genera distinta
+          </button>
         </div>
+      )}
+
+      {distintaOpen && (
+        <DistintaModal session={session} players={players} team={team}
+          onClose={() => setDistintaOpen(false)} />
       )}
 
       {/* switch presenze / piano di lavoro */}
@@ -882,12 +1190,47 @@ function Statistiche({ state, coach, team, onOpen }) {
 
   return (
     <div style={{ paddingTop: 20 }}>
+      <AbsenceAlert alerts={absenceAlerts(players, sessions)} onOpen={onOpen} />
       <SectionTitle>Riepilogo squadra</SectionTitle>
       <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
         <MiniStat n={players.length} l="Atleti" accent={C.lime} />
         <MiniStat n={trainings} l="Allenam." accent={C.chalk} />
         <MiniStat n={matches} l="Partite" accent={C.clay} />
       </div>
+
+      {(() => {
+        const unavailable = players.filter((p) => p.status && p.status !== "disponibile");
+        if (unavailable.length === 0) return null;
+        return (
+          <div style={{ ...cardWrap, marginBottom: 24 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: C.chalk }}>
+              Indisponibili · {unavailable.length}
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {unavailable.map((p) => {
+                const m = statusMeta(p.status);
+                return (
+                  <button key={p.id} onClick={() => onOpen(p.id)}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: 10, background: C.pitchDeep, border: `1px solid ${C.line}`,
+                      borderRadius: 10, padding: "9px 12px", width: "100%", textAlign: "left" }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: m.color,
+                        flexShrink: 0 }} />
+                      <span style={{ fontWeight: 600, fontSize: 14, color: C.chalk,
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {p.name}</span>
+                    </span>
+                    <span style={{ color: m.color, fontSize: 12, fontWeight: 600, flexShrink: 0 }}>
+                      {m.label}{p.returnDate ? ` · ${p.returnDate}` : ""}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       <SectionTitle>Esporta presenze</SectionTitle>
       <div style={{ ...cardWrap, display: "flex", gap: 10 }}>
@@ -953,6 +1296,36 @@ function playerStats(pid, sessions) {
     rate: total ? Math.round((present / total) * 100) : 0,
     avgMin: callups ? Math.round(minutes / callups) : 0,
   };
+}
+
+// Soglia di allerta assenze nell'arco di 7 giorni
+const ABSENCE_ALERT_THRESHOLD = 3;
+
+// Conta le assenze "assente" di un atleta negli ultimi 7 giorni
+function weeklyAbsences(pid, sessions) {
+  const now = Date.now();
+  const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+  return sessions.filter((s) => {
+    if (s.records[pid] !== "assente") return false;
+    const t = new Date(s.date + "T00:00:00").getTime();
+    return !isNaN(t) && t >= weekAgo && t <= now;
+  }).length;
+}
+
+// Elenco atleti oltre soglia negli ultimi 7 giorni
+function absenceAlerts(players, sessions) {
+  return players
+    .map((p) => ({ player: p, count: weeklyAbsences(p.id, sessions) }))
+    .filter((x) => x.count > ABSENCE_ALERT_THRESHOLD);
+}
+
+// Metadati per lo stato di disponibilità
+function statusMeta(status) {
+  switch (status) {
+    case "infortunato": return { label: "Infortunato", color: C.clay };
+    case "recupero": return { label: "In recupero", color: C.amber };
+    default: return { label: "Disponibile", color: C.lime };
+  }
 }
 
 // ─── Export CSV (Excel) ─────────────────────────────────────────────
@@ -1138,6 +1511,37 @@ const Legend = ({ color, label }) => (
     <span style={{ width: 10, height: 10, borderRadius: 3, background: color }} /> {label}
   </span>
 );
+
+function AbsenceAlert({ alerts, onOpen }) {
+  if (!alerts || alerts.length === 0) return null;
+  return (
+    <div style={{ background: "rgba(232,137,106,0.12)", border: `1px solid ${C.clay}`,
+      borderRadius: 14, padding: "14px 16px", marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <AlertTriangle size={18} color={C.clay} />
+        <span style={{ fontWeight: 700, fontSize: 14, color: C.clay }}>
+          {alerts.length === 1 ? "Atleta da tenere d'occhio" : "Atleti da tenere d'occhio"}
+        </span>
+      </div>
+      <div style={{ color: C.chalk, fontSize: 13, lineHeight: 1.5, marginBottom: 4 }}>
+        {alerts.length === 1 ? "Ha" : "Hanno"} più di {ABSENCE_ALERT_THRESHOLD} assenze
+        negli ultimi 7 giorni:
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+        {alerts.map(({ player, count }) => (
+          <button key={player.id} onClick={() => onOpen && onOpen(player.id)}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: C.pitchDeep,
+              border: `1px solid ${C.clay}`, borderRadius: 9, padding: "6px 10px",
+              color: C.chalk, fontSize: 13, fontWeight: 600 }}>
+            {player.name}
+            <span style={{ background: C.clay, color: C.pitchDeep, borderRadius: 6,
+              padding: "1px 6px", fontSize: 12, fontWeight: 700 }}>{count}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function Empty({ icon, text }) {
   return (
