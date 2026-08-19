@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Users, ClipboardList, CalendarCheck, Plus, Trash2, ChevronLeft, Check, X, Minus, Save, LogOut, Download, Upload, BarChart3, Clock, Trophy, Timer, ClipboardPen, GripVertical, AlertTriangle, FileText } from "lucide-react";
+import { Users, ClipboardList, CalendarCheck, Plus, Trash2, ChevronLeft, Check, X, Minus, Save, LogOut, Download, Upload, BarChart3, Clock, Trophy, Timer, ClipboardPen, GripVertical, AlertTriangle, FileText, Shield } from "lucide-react";
+import { hasSupabase } from "./supabaseClient.js";
+import * as db from "./dataLayer.js";
 
 // ─── Palette: campo da gioco notturno ───────────────────────────────
 const C = {
@@ -14,193 +16,193 @@ const C = {
   line: "#1E4C3D",
 };
 
-const ROSTER_KEY = "coach:roster:v2";
-// dati di una singola squadra, isolati per allenatore + squadra
-const teamKey = (coachId, teamId) => `coach:team:${coachId}:${teamId}:v2`;
-
 const emptyTeam = { players: [], sessions: [] };
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 // Enti di tesseramento supportati
 const FEDERATIONS = ["C.S.I.", "C.S.E.N.", "A.I.C.S.", "F.I.G.C."];
 
-// ─── Backup completo: raccoglie allenatori, squadre e i dati di ogni team ─
-async function buildBackup() {
-  let coaches = [];
-  try {
-    const r = await window.storage.get(ROSTER_KEY);
-    if (r && r.value) coaches = JSON.parse(r.value).coaches || [];
-  } catch (e) { /* vuoto */ }
-
-  const teamsData = {}; // { "coachId:teamId": {players, sessions} }
-  for (const c of coaches) {
-    for (const t of (c.teams || [])) {
-      try {
-        const r = await window.storage.get(teamKey(c.id, t.id));
-        if (r && r.value) teamsData[`${c.id}:${t.id}`] = JSON.parse(r.value);
-      } catch (e) { /* squadra senza dati */ }
-    }
-  }
-  return {
-    app: "spogliatoio", version: 2,
-    exportedAt: new Date().toISOString(),
-    coaches, teamsData,
-  };
-}
-
-function downloadBackup(backup) {
-  const blob = new Blob([JSON.stringify(backup, null, 2)],
-    { type: "application/json;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `spogliatoio-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-// Scrive un backup nello storage, sostituendo tutti i dati esistenti
-async function restoreBackup(backup) {
-  if (!backup || backup.app !== "spogliatoio" || !Array.isArray(backup.coaches))
-    throw new Error("File di backup non valido");
-  // pulisco i vecchi dati squadra per non lasciare orfani
-  try {
-    const r = await window.storage.get(ROSTER_KEY);
-    const old = r && r.value ? (JSON.parse(r.value).coaches || []) : [];
-    for (const c of old)
-      for (const t of (c.teams || []))
-        try { await window.storage.delete(teamKey(c.id, t.id)); } catch (e) { /* ignora */ }
-  } catch (e) { /* niente da pulire */ }
-
-  await window.storage.set(ROSTER_KEY, JSON.stringify({ coaches: backup.coaches }));
-  const td = backup.teamsData || {};
-  for (const key of Object.keys(td)) {
-    const [cId, tId] = key.split(":");
-    if (cId && tId) await window.storage.set(teamKey(cId, tId), JSON.stringify(td[key]));
-  }
-}
-
-// ─── Root: login e caricamento squadra ──────────────────────────────
+// ─── Root: autenticazione e instradamento per ruolo ─────────────────
 export default function App() {
-  const [coaches, setCoaches] = useState([]);
-  const [coachId, setCoachId] = useState(null);
+  const [ready, setReady] = useState(false);
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [teams, setTeams] = useState([]);
   const [teamId, setTeamId] = useState(null);
-  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
 
+  // Se le chiavi Supabase non sono configurate, avvisa chiaramente
+  if (!hasSupabase) return <ConfigMissing />;
+
+  // segue lo stato del login
   useEffect(() => {
+    let unsub = () => {};
+    (async () => {
+      const s = await db.getSession();
+      setSession(s);
+      unsub = db.onAuthChange((ns) => setSession(ns));
+      setReady(true);
+    })();
+    return () => unsub();
+  }, []);
+
+  // quando c'è una sessione, carica profilo e squadre
+  useEffect(() => {
+    if (!session) { setProfile(null); setTeams([]); setTeamId(null); return; }
     (async () => {
       try {
-        const r = await window.storage.get(ROSTER_KEY);
-        if (r && r.value) setCoaches(JSON.parse(r.value).coaches || []);
-      } catch (e) { /* prima apertura */ }
-      try {
-        const s = await window.storage.get("coach:session:v2");
-        if (s && s.value) {
-          const sess = JSON.parse(s.value);
-          setCoachId(sess.coachId || null);
-          setTeamId(sess.teamId || null);
+        const p = await db.getMyProfile();
+        setProfile(p);
+        if (p && p.role !== "supervisore") {
+          const t = await db.listTeams();
+          setTeams(t);
         }
-      } catch (e) { /* nessuna sessione */ }
-      setLoaded(true);
+      } catch (e) { setError(e.message || String(e)); }
     })();
+  }, [session]);
+
+  const reloadTeams = useCallback(async () => {
+    const t = await db.listTeams();
+    setTeams(t);
   }, []);
 
-  const persistCoaches = useCallback(async (next) => {
-    setCoaches(next);
-    try { await window.storage.set(ROSTER_KEY, JSON.stringify({ coaches: next })); }
-    catch (e) { console.error(e); }
-  }, []);
+  if (!ready) return <Splash />;
 
-  const saveSession = async (cId, tId) => {
-    try { await window.storage.set("coach:session:v2",
-      JSON.stringify({ coachId: cId, teamId: tId })); } catch (e) { /* ignora */ }
-  };
+  // 1) non autenticato → login
+  if (!session) return <AuthScreen onError={setError} error={error} />;
+  if (!profile) return <Splash />;
 
-  const login = async (id) => { setCoachId(id); setTeamId(null); await saveSession(id, null); };
-  const openTeam = async (tId) => { setTeamId(tId); await saveSession(coachId, tId); };
-  const backToTeams = async () => { setTeamId(null); await saveSession(coachId, null); };
-  const logout = async () => {
-    setCoachId(null); setTeamId(null);
-    try { await window.storage.delete("coach:session:v2"); } catch (e) { /* ignora */ }
-  };
-
-  // aggiorna un allenatore (usato per gestire l'elenco delle sue squadre)
-  const updateCoach = (cId, patch) =>
-    persistCoaches(coaches.map((c) => c.id === cId ? { ...c, ...patch } : c));
-
-  if (!loaded) return <Splash />;
-
-  const coach = coaches.find((c) => c.id === coachId);
-
-  // 1) nessun allenatore scelto → login
-  if (!coach) {
-    return <Login coaches={coaches} onLogin={login}
-      onCreate={(name) => {
-        const c = { id: uid(), name: name.trim(), teams: [] };
-        persistCoaches([...coaches, c]);
-        login(c.id);
-      }}
-      onRemove={(id) => persistCoaches(coaches.filter((c) => c.id !== id))} />;
+  // 2) supervisore → cruscotto globale
+  if (profile.role === "supervisore") {
+    return <SupervisorDashboard profile={profile} onLogout={() => db.signOut()} />;
   }
 
-  const teams = coach.teams || [];
+  // 3) tecnico: selettore squadre o app
   const team = teams.find((t) => t.id === teamId);
-
-  // 2) allenatore scelto ma nessuna squadra attiva → selettore squadre
   if (!team) {
-    return <TeamPicker coach={coach}
-      onOpen={openTeam}
-      onLogout={logout}
-      onExport={async () => { downloadBackup(await buildBackup()); }}
-      onImport={async (data) => {
-        await restoreBackup(data);
-        const fresh = (data.coaches || []).find((c) => c.id === coach.id) ? coach.id
-          : (data.coaches && data.coaches[0] ? data.coaches[0].id : null);
-        setCoaches(data.coaches || []);
-        setCoachId(fresh);
-        setTeamId(null);
-        await saveSession(fresh, null);
+    return <TeamPicker
+      profile={profile}
+      teams={teams}
+      onOpen={(id) => setTeamId(id)}
+      onLogout={() => db.signOut()}
+      onCreate={async (name) => {
+        const t = await db.createTeam(name);
+        await reloadTeams();
+        setTeamId(t.id);
       }}
-      onCreate={(name) => {
-        const t = { id: uid(), name: name.trim() };
-        updateCoach(coach.id, { teams: [...teams, t] });
-        openTeam(t.id);
-      }}
-      onRename={(tId, name) =>
-        updateCoach(coach.id, { teams: teams.map((t) => t.id === tId ? { ...t, name } : t) })}
-      onRemove={async (tId) => {
-        updateCoach(coach.id, { teams: teams.filter((t) => t.id !== tId) });
-        try { await window.storage.delete(teamKey(coach.id, tId)); } catch (e) { /* ignora */ }
-      }} />;
+      onRename={async (id, name) => { await db.renameTeam(id, name); await reloadTeams(); }}
+      onRemove={async (id) => { await db.deleteTeam(id); await reloadTeams(); }}
+    />;
   }
+  return <TeamApp team={team} profile={profile}
+    onLogout={() => db.signOut()} onSwitchTeam={() => setTeamId(null)} />;
+}
 
-  // 3) squadra attiva → app
-  return <TeamApp coach={coach} team={team} onLogout={logout} onSwitchTeam={backToTeams} />;
+// ─── Avviso: configurazione mancante ────────────────────────────────
+function ConfigMissing() {
+  return (
+    <Shell>
+      <div style={{ maxWidth: 460, margin: "0 auto", padding: "80px 24px", textAlign: "center" }}>
+        <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 24,
+          marginBottom: 16 }}>Spogliatoio<span style={{ color: C.lime }}>.</span></div>
+        <div style={{ color: C.amber, fontWeight: 600, marginBottom: 10 }}>
+          Configurazione database mancante
+        </div>
+        <div style={{ color: C.muted, fontSize: 14, lineHeight: 1.6 }}>
+          Le chiavi di collegamento al database non sono impostate. Vanno aggiunte nelle
+          variabili d'ambiente di Vercel (VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY) e poi
+          va rifatto il deploy.
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+// ─── Schermata di accesso (login / registrazione) ───────────────────
+function AuthScreen({ onError, error }) {
+  const [mode, setMode] = useState("login"); // login | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const submit = async () => {
+    setBusy(true); setMsg(""); onError("");
+    try {
+      if (mode === "signup") {
+        if (!name.trim()) throw new Error("Inserisci il tuo nome.");
+        await db.signUp(email.trim(), password, name.trim());
+        setMsg("Registrazione riuscita. Ora puoi accedere.");
+        setMode("login");
+      } else {
+        await db.signIn(email.trim(), password);
+      }
+    } catch (e) {
+      onError(traduciErrore(e));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Shell>
+      <div style={{ maxWidth: 400, margin: "0 auto", padding: "64px 20px" }}>
+        <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 30,
+          letterSpacing: "-0.02em", textAlign: "center" }}>
+          Spogliatoio<span style={{ color: C.lime }}>.</span>
+        </div>
+        <div style={{ color: C.muted, fontSize: 14, textAlign: "center", marginTop: 8,
+          marginBottom: 32 }}>
+          {mode === "login" ? "Accedi al tuo account" : "Crea il tuo account"}
+        </div>
+
+        <div style={cardWrap}>
+          {mode === "signup" && (
+            <input value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="Nome e cognome" style={{ ...inp, marginBottom: 10 }} />
+          )}
+          <input value={email} onChange={(e) => setEmail(e.target.value)}
+            placeholder="Email" type="email" autoComplete="email"
+            style={{ ...inp, marginBottom: 10 }} />
+          <input value={password} onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="Password" type="password"
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            style={{ ...inp, marginBottom: 14 }} />
+          <button onClick={submit} disabled={busy}
+            style={{ ...primaryBtn, width: "100%", justifyContent: "center" }}>
+            {busy ? "Attendere…" : (mode === "login" ? "Accedi" : "Registrati")}
+          </button>
+          {msg && <div style={{ color: C.lime, fontSize: 13, marginTop: 12,
+            textAlign: "center" }}>{msg}</div>}
+          {error && <div style={{ color: C.clay, fontSize: 13, marginTop: 12,
+            textAlign: "center" }}>{error}</div>}
+        </div>
+
+        <div style={{ textAlign: "center", marginTop: 18 }}>
+          <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); onError(""); setMsg(""); }}
+            style={{ background: "transparent", color: C.muted, fontSize: 13, fontWeight: 600 }}>
+            {mode === "login" ? "Non hai un account? Registrati" : "Hai già un account? Accedi"}
+          </button>
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function traduciErrore(e) {
+  const m = (e && e.message ? e.message : String(e)).toLowerCase();
+  if (m.includes("invalid login")) return "Email o password non corretti.";
+  if (m.includes("already registered") || m.includes("already been registered"))
+    return "Questa email è già registrata. Prova ad accedere.";
+  if (m.includes("password")) return "La password deve avere almeno 6 caratteri.";
+  if (m.includes("email")) return "Controlla l'indirizzo email.";
+  return e && e.message ? e.message : "Si è verificato un errore. Riprova.";
 }
 
 // ─── Selettore squadre ──────────────────────────────────────────────
-function TeamPicker({ coach, onOpen, onCreate, onRename, onRemove, onLogout, onExport, onImport }) {
+function TeamPicker({ profile, teams, onOpen, onCreate, onRename, onRemove, onLogout }) {
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const fileRef = React.useRef(null);
-  const teams = coach.teams || [];
-
-  const pickFile = () => fileRef.current && fileRef.current.click();
-  const onFile = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    e.target.value = ""; // permette di reimportare lo stesso file
-    if (!file) return;
-    if (!window.confirm(
-      "Importare questo backup sostituirà TUTTI i dati attuali (allenatori, squadre, presenze). Procedere?"))
-      return;
-    setBusy(true);
-    try {
-      const text = await file.text();
-      await onImport(JSON.parse(text));
-    } catch (err) {
-      alert("Impossibile importare: " + (err && err.message ? err.message : "file non valido"));
-    } finally { setBusy(false); }
-  };
+  const coachName = (profile && profile.full_name) || "";
 
   return (
     <Shell>
@@ -212,7 +214,7 @@ function TeamPicker({ coach, onOpen, onCreate, onRename, onRemove, onLogout, onE
               letterSpacing: "-0.02em" }}>
               Spogliatoio<span style={{ color: C.lime }}>.</span>
             </div>
-            <div style={{ color: C.muted, fontSize: 13, marginTop: 5 }}>Mister {coach.name}</div>
+            <div style={{ color: C.muted, fontSize: 13, marginTop: 5 }}>Mister {coachName}</div>
           </div>
           <button onClick={onLogout} style={{ ...backBtn, marginBottom: 0, padding: "8px 10px",
             border: `1px solid ${C.line}`, borderRadius: 10 }}>
@@ -259,87 +261,18 @@ function TeamPicker({ coach, onOpen, onCreate, onRename, onRemove, onLogout, onE
           <button onClick={() => { if (name.trim()) { onCreate(name); setName(""); } }}
             style={primaryBtn}><Plus size={18} strokeWidth={2.5} /></button>
         </div>
-
-        <div style={{ marginTop: 36 }}>
-          <SectionTitle>Backup dei dati</SectionTitle>
-          <div style={cardWrap}>
-            <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.5, marginBottom: 14 }}>
-              Il backup salva <b style={{ color: C.chalk }}>tutto</b>: allenatori, squadre,
-              rose, presenze e piani di lavoro, in un unico file. Tienilo al sicuro o usalo
-              per spostare i dati su un altro dispositivo.
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={onExport} disabled={busy}
-                style={{ ...primaryBtn, flex: 1, justifyContent: "center" }}>
-                <Download size={17} /> Esporta backup
-              </button>
-              <button onClick={pickFile} disabled={busy}
-                style={{ ...outlineBtn, flex: 1, justifyContent: "center" }}>
-                <Upload size={17} /> {busy ? "Importo…" : "Importa backup"}
-              </button>
-            </div>
-            <input ref={fileRef} type="file" accept="application/json,.json"
-              onChange={onFile} style={{ display: "none" }} />
-          </div>
-        </div>
-      </div>
-    </Shell>
-  );
-}
-
-// ─── Login / selezione allenatore ───────────────────────────────────
-function Login({ coaches, onLogin, onCreate, onRemove }) {
-  const [name, setName] = useState("");
-  return (
-    <Shell>
-      <div style={{ maxWidth: 420, margin: "0 auto", padding: "64px 20px" }}>
-        <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 30,
-          letterSpacing: "-0.02em", textAlign: "center" }}>
-          Spogliatoio<span style={{ color: C.lime }}>.</span>
-        </div>
-        <div style={{ color: C.muted, fontSize: 14, textAlign: "center", marginTop: 8,
-          marginBottom: 36 }}>Ogni allenatore, le sue squadre</div>
-
-        {coaches.length > 0 && (
-          <>
-            <SectionTitle>Accedi come</SectionTitle>
-            <div style={{ display: "grid", gap: 10, marginBottom: 28 }}>
-              {coaches.map((c) => (
-                <div key={c.id} style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => onLogin(c.id)} style={{ ...rowCard, flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                      <div style={{ ...jersey, background: C.lime, color: C.pitchDeep }}>
-                        {c.name.charAt(0).toUpperCase()}
-                      </div>
-                      <div style={{ fontWeight: 600, fontSize: 16 }}>{c.name}</div>
-                    </div>
-                  </button>
-                  <button onClick={() => onRemove(c.id)} style={dangerBtn}><Trash2 size={16} /></button>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-
-        <SectionTitle>Nuovo allenatore</SectionTitle>
-        <div style={{ display: "flex", gap: 10 }}>
-          <input value={name} onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) { onCreate(name); setName(""); } }}
-            placeholder="Il tuo nome" style={inp} />
-          <button onClick={() => { if (name.trim()) { onCreate(name); setName(""); } }}
-            style={primaryBtn}><Plus size={18} strokeWidth={2.5} /></button>
-        </div>
       </div>
     </Shell>
   );
 }
 
 // ─── App di squadra ─────────────────────────────────────────────────
-function TeamApp({ coach, team, onLogout, onSwitchTeam }) {
+function TeamApp({ team, profile, onLogout, onSwitchTeam }) {
   const [state, setState] = useState(emptyTeam);
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("rosa");
   const [openPlayer, setOpenPlayer] = useState(null);
+  const coach = { name: (profile && profile.full_name) || "" };
 
   useEffect(() => {
     let alive = true;
@@ -347,20 +280,55 @@ function TeamApp({ coach, team, onLogout, onSwitchTeam }) {
     setOpenPlayer(null);
     (async () => {
       try {
-        const r = await window.storage.get(teamKey(coach.id, team.id));
-        if (alive && r && r.value) setState(JSON.parse(r.value));
-        else if (alive) setState(emptyTeam);
-      } catch (e) { if (alive) setState(emptyTeam); }
+        const data = await db.loadTeamData(team.id);
+        if (alive) setState(data);
+      } catch (e) { if (alive) setState(emptyTeam); console.error(e); }
       if (alive) setLoaded(true);
     })();
     return () => { alive = false; };
-  }, [coach.id, team.id]);
+  }, [team.id]);
 
+  // persist riceve il nuovo stato completo; calcola le differenze e le scrive sul db,
+  // poi ricarica dal db per avere gli id reali generati dal database.
   const persist = useCallback(async (next) => {
-    setState(next);
-    try { await window.storage.set(teamKey(coach.id, team.id), JSON.stringify(next)); }
-    catch (e) { console.error(e); }
-  }, [coach.id, team.id]);
+    const prev = state;
+    setState(next); // aggiornamento ottimistico immediato per la UI
+    try {
+      // --- ATLETI ---
+      const prevP = new Map((prev.players || []).map((p) => [p.id, p]));
+      const nextP = new Map((next.players || []).map((p) => [p.id, p]));
+      for (const p of next.players || []) {
+        if (!prevP.has(p.id)) {
+          // nuovo (id temporaneo generato dall'app): crea e sostituisci id
+          const created = await db.addPlayer(team.id, p);
+          setState((s) => ({ ...s,
+            players: s.players.map((x) => x.id === p.id ? created : x) }));
+        } else if (JSON.stringify(prevP.get(p.id)) !== JSON.stringify(p)) {
+          await db.updatePlayer(team.id, p);
+        }
+      }
+      for (const p of prev.players || [])
+        if (!nextP.has(p.id)) await db.removePlayer(p.id);
+
+      // --- SEDUTE ---
+      const prevS = new Map((prev.sessions || []).map((s) => [s.id, s]));
+      const nextS = new Map((next.sessions || []).map((s) => [s.id, s]));
+      for (const s of next.sessions || []) {
+        if (!prevS.has(s.id)) {
+          const created = await db.addSession(team.id, s);
+          setState((st) => ({ ...st,
+            sessions: st.sessions.map((x) => x.id === s.id ? created : x) }));
+        } else if (JSON.stringify(prevS.get(s.id)) !== JSON.stringify(s)) {
+          await db.updateSession(team.id, s);
+        }
+      }
+      for (const s of prev.sessions || [])
+        if (!nextS.has(s.id)) await db.removeSession(s.id);
+    } catch (e) {
+      console.error("Salvataggio non riuscito", e);
+      alert("Salvataggio non riuscito. Controlla la connessione e riprova.");
+    }
+  }, [state, team.id]);
 
   if (!loaded) return <Splash />;
 
@@ -390,6 +358,170 @@ function TeamApp({ coach, team, onLogout, onSwitchTeam }) {
       </main>
       {!player && <TabBar tab={tab} setTab={setTab} />}
     </Shell>
+  );
+}
+
+// ─── Cruscotto supervisore (sola lettura, vede tutto) ───────────────
+function SupervisorDashboard({ profile, onLogout }) {
+  const [loaded, setLoaded] = useState(false);
+  const [all, setAll] = useState(null);
+  const [openTeam, setOpenTeam] = useState(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try { setAll(await db.loadEverything()); }
+      catch (e) { setErr(e.message || String(e)); }
+      setLoaded(true);
+    })();
+  }, []);
+
+  if (!loaded) return <Splash />;
+  if (err) return (
+    <Shell><div style={{ maxWidth: 500, margin: "0 auto", padding: 40, color: C.clay }}>
+      Errore nel caricamento: {err}</div></Shell>
+  );
+
+  const { teams, players, sessions, profiles } = all;
+  const playersByTeam = (tid) => players.filter((p) => {
+    const raw = all.rawPlayers.find((r) => r.id === p.id);
+    return raw && raw.team_id === tid;
+  });
+  const sessionsByTeam = (tid) => sessions.filter((s) => {
+    const raw = all.rawSessions.find((r) => r.id === s.id);
+    return raw && raw.team_id === tid;
+  });
+  const coachName = (ownerId) => {
+    const pr = profiles.find((p) => p.id === ownerId);
+    return pr ? pr.full_name : "—";
+  };
+
+  // vista dettaglio squadra (sola lettura)
+  if (openTeam) {
+    const t = teams.find((x) => x.id === openTeam);
+    const tp = playersByTeam(openTeam);
+    const ts = sessionsByTeam(openTeam);
+    return (
+      <Shell>
+        <SupHeader title={t ? t.name : "Squadra"} subtitle={`Mister ${coachName(t?.owner)}`}
+          onBack={() => setOpenTeam(null)} onLogout={onLogout} />
+        <main style={{ maxWidth: 760, margin: "0 auto", padding: "20px 16px 60px" }}>
+          <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+            <MiniStat n={tp.length} l="Atleti" accent={C.lime} />
+            <MiniStat n={ts.filter((s) => s.type === "allenamento").length} l="Allenam." accent={C.chalk} />
+            <MiniStat n={ts.filter((s) => s.type === "partita").length} l="Partite" accent={C.clay} />
+          </div>
+
+          <SectionTitle>Rosa</SectionTitle>
+          {tp.length === 0 ? (
+            <Empty icon={<Users size={24} />} text="Nessun atleta in questa squadra." />
+          ) : (
+            <div style={{ display: "grid", gap: 8, marginBottom: 24 }}>
+              {tp.map((p) => {
+                const st = playerStats(p.id, ts);
+                const m = statusMeta(p.status);
+                return (
+                  <div key={p.id} style={{ ...rowCard, cursor: "default" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                      <div style={{ ...jersey, width: 34, height: 34, fontSize: 13 }}>{p.number || "–"}</div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 15 }}>{p.name}</div>
+                        <div style={{ color: C.muted, fontSize: 12, display: "flex",
+                          alignItems: "center", gap: 6 }}>
+                          {(p.status && p.status !== "disponibile") && (
+                            <span style={{ width: 7, height: 7, borderRadius: "50%",
+                              background: m.color }} />
+                          )}
+                          {p.role || "—"}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800,
+                        color: C.lime, fontSize: 16 }}>{st.rate}%</div>
+                      <div style={miniLabel}>presenze</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </main>
+      </Shell>
+    );
+  }
+
+  // vista elenco squadre
+  return (
+    <Shell>
+      <SupHeader title="Supervisione" subtitle={profile.full_name}
+        onLogout={onLogout} icon={<Shield size={18} color={C.lime} />} />
+      <main style={{ maxWidth: 760, margin: "0 auto", padding: "20px 16px 60px" }}>
+        <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+          <MiniStat n={profiles.filter((p) => p.role === "tecnico").length} l="Tecnici" accent={C.chalk} />
+          <MiniStat n={teams.length} l="Squadre" accent={C.lime} />
+          <MiniStat n={players.length} l="Atleti" accent={C.amber} />
+        </div>
+
+        <SectionTitle>Tutte le squadre</SectionTitle>
+        {teams.length === 0 ? (
+          <Empty icon={<Users size={26} />} text="Nessuna squadra creata dai tecnici, per ora." />
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {teams.map((t) => {
+              const tp = playersByTeam(t.id);
+              const ts = sessionsByTeam(t.id);
+              return (
+                <button key={t.id} onClick={() => setOpenTeam(t.id)} style={rowCard}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                    <div style={{ ...jersey, background: C.lime, color: C.pitchDeep, fontSize: 16 }}>
+                      {t.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div style={{ textAlign: "left", minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 16 }}>{t.name}</div>
+                      <div style={{ color: C.muted, fontSize: 13 }}>Mister {coachName(t.owner)}</div>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800,
+                      color: C.lime, fontSize: 16 }}>{tp.length}</div>
+                    <div style={miniLabel}>atleti</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </main>
+    </Shell>
+  );
+}
+
+function SupHeader({ title, subtitle, onBack, onLogout, icon }) {
+  return (
+    <header style={{ background: C.pitch, borderBottom: `1px solid ${C.line}`, padding: "18px 16px" }}>
+      <div style={{ maxWidth: 760, margin: "0 auto", display: "flex",
+        alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          {onBack && (
+            <button onClick={onBack} style={{ background: "transparent", padding: 0 }}>
+              <ChevronLeft size={22} color={C.muted} />
+            </button>
+          )}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 20,
+              letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 8 }}>
+              {icon}{title}
+            </div>
+            {subtitle && <div style={{ color: C.muted, fontSize: 12, marginTop: 3 }}>{subtitle}</div>}
+          </div>
+        </div>
+        <button onClick={onLogout} style={{ ...backBtn, marginBottom: 0, padding: "8px 10px",
+          border: `1px solid ${C.line}`, borderRadius: 10, flexShrink: 0 }}>
+          <LogOut size={16} /> Esci
+        </button>
+      </div>
+    </header>
   );
 }
 
