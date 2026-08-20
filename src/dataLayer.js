@@ -93,6 +93,79 @@ function playerFromDb(r) {
   };
 }
 
+// ─── Anagrafica atleti (athletes) e collegamenti (team_players) ──────
+function athleteToDb(p) {
+  return {
+    name: p.name, number: p.number, role: p.role, birth: p.birth,
+    foot: p.foot, height: p.height, weight: p.weight, shoe: p.shoe,
+    card_numbers: p.cardNumbers || {}, federations: p.federations || [],
+    id_document: p.idDocument || "",
+    status: p.status || "disponibile", status_note: p.statusNote || "",
+    return_date: p.returnDate || "",
+    notes: p.notes || "", strengths: p.strengths || "", goals: p.goals || "",
+  };
+}
+function athleteFromDb(r) {
+  return {
+    id: r.id, name: r.name, number: r.number || "", role: r.role || "",
+    birth: r.birth || "", foot: r.foot || "", height: r.height || "",
+    weight: r.weight || "", shoe: r.shoe || "",
+    cardNumbers: r.card_numbers || {}, federations: r.federations || [],
+    idDocument: r.id_document || "",
+    status: r.status || "disponibile", statusNote: r.status_note || "",
+    returnDate: r.return_date || "",
+    notes: r.notes || "", strengths: r.strengths || "", goals: r.goals || "",
+  };
+}
+
+// Anagrafica: elenco completo
+export async function listAthletes() {
+  const { data, error } = await supabase
+    .from("athletes").select("*").order("name");
+  if (error) throw error;
+  return data.map(athleteFromDb);
+}
+export async function addAthlete(p) {
+  const { data, error } = await supabase
+    .from("athletes").insert(athleteToDb(p)).select().single();
+  if (error) throw error;
+  return athleteFromDb(data);
+}
+export async function addAthletesBulk(list) {
+  if (!list || list.length === 0) return [];
+  const rows = list.map(athleteToDb);
+  const { data, error } = await supabase.from("athletes").insert(rows).select();
+  if (error) throw error;
+  return (data || []).map(athleteFromDb);
+}
+export async function updateAthlete(p) {
+  const { error } = await supabase
+    .from("athletes").update(athleteToDb(p)).eq("id", p.id);
+  if (error) throw error;
+}
+export async function removeAthlete(id) {
+  const { error } = await supabase.from("athletes").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// Collegamenti squadra ↔ atleta
+export async function listTeamAthleteIds(teamId) {
+  const { data, error } = await supabase
+    .from("team_players").select("athlete_id").eq("team_id", teamId);
+  if (error) throw error;
+  return (data || []).map((r) => r.athlete_id);
+}
+export async function addAthleteToTeam(teamId, athleteId) {
+  const { error } = await supabase
+    .from("team_players").insert({ team_id: teamId, athlete_id: athleteId });
+  if (error && !String(error.message).includes("duplicate")) throw error;
+}
+export async function removeAthleteFromTeam(teamId, athleteId) {
+  const { error } = await supabase.from("team_players")
+    .delete().eq("team_id", teamId).eq("athlete_id", athleteId);
+  if (error) throw error;
+}
+
 // ─── Sedute ─────────────────────────────────────────────────────────
 function sessionToDb(s, teamId) {
   return {
@@ -108,16 +181,23 @@ function sessionFromDb(r) {
   };
 }
 
-// Carica atleti + sedute di una squadra, nel formato dell'app
+// Carica atleti (dall'anagrafica, tramite collegamenti) + sedute di una squadra
 export async function loadTeamData(teamId) {
-  const [pl, ss] = await Promise.all([
-    supabase.from("players").select("*").eq("team_id", teamId).order("created_at"),
+  const [links, ss] = await Promise.all([
+    supabase.from("team_players").select("athlete_id").eq("team_id", teamId),
     supabase.from("sessions").select("*").eq("team_id", teamId).order("date", { ascending: false }),
   ]);
-  if (pl.error) throw pl.error;
+  if (links.error) throw links.error;
   if (ss.error) throw ss.error;
+  const ids = (links.data || []).map((r) => r.athlete_id);
+  let players = [];
+  if (ids.length > 0) {
+    const at = await supabase.from("athletes").select("*").in("id", ids).order("name");
+    if (at.error) throw at.error;
+    players = at.data.map(athleteFromDb);
+  }
   return {
-    players: pl.data.map(playerFromDb),
+    players,
     sessions: ss.data.map(sessionFromDb),
   };
 }
@@ -128,6 +208,15 @@ export async function addPlayer(teamId, p) {
     .from("players").insert(playerToDb(p, teamId)).select().single();
   if (error) throw error;
   return playerFromDb(data);
+}
+
+// Inserisce più atleti in una sola operazione (import da Excel)
+export async function addPlayersBulk(teamId, players) {
+  if (!players || players.length === 0) return [];
+  const rows = players.map((p) => playerToDb(p, teamId));
+  const { data, error } = await supabase.from("players").insert(rows).select();
+  if (error) throw error;
+  return (data || []).map(playerFromDb);
 }
 export async function updatePlayer(teamId, p) {
   const { error } = await supabase
@@ -157,19 +246,24 @@ export async function removeSession(id) {
 
 // ─── Supervisore: panoramica di tutto ───────────────────────────────
 export async function loadEverything() {
-  const [teams, players, sessions, profiles] = await Promise.all([
+  const [teams, athletes, links, sessions, profiles] = await Promise.all([
     supabase.from("teams").select("*").order("created_at"),
-    supabase.from("players").select("*"),
+    supabase.from("athletes").select("*"),
+    supabase.from("team_players").select("*"),
     supabase.from("sessions").select("*"),
     supabase.from("profiles").select("*"),
   ]);
   if (teams.error) throw teams.error;
+  const athleteList = (athletes.data || []).map(athleteFromDb);
+  const byId = new Map(athleteList.map((a) => [a.id, a]));
+  const linkRows = links.data || [];
   return {
     teams: teams.data,
-    players: (players.data || []).map(playerFromDb),
+    athletes: athleteList,               // anagrafica completa
+    links: linkRows,                     // { team_id, athlete_id }
+    athletesById: byId,
     sessions: (sessions.data || []).map(sessionFromDb),
     profiles: profiles.data || [],
-    rawPlayers: players.data || [],
     rawSessions: sessions.data || [],
   };
 }

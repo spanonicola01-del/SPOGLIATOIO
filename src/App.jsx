@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Users, ClipboardList, CalendarCheck, Plus, Trash2, ChevronLeft, Check, X, Minus, Save, LogOut, Download, Upload, BarChart3, Clock, Trophy, Timer, ClipboardPen, GripVertical, AlertTriangle, FileText, Shield } from "lucide-react";
+import { Users, ClipboardList, CalendarCheck, Plus, Trash2, ChevronLeft, Check, X, Minus, Save, LogOut, Download, Upload, BarChart3, Clock, Trophy, Timer, ClipboardPen, GripVertical, AlertTriangle, FileText, Shield, FileSpreadsheet } from "lucide-react";
 import { hasSupabase } from "./supabaseClient.js";
 import * as db from "./dataLayer.js";
+import * as XLSX from "xlsx";
 
 // ─── Palette: campo da gioco notturno ───────────────────────────────
 const C = {
@@ -21,6 +22,75 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 
 // Enti di tesseramento supportati
 const FEDERATIONS = ["C.S.I.", "C.S.E.N.", "A.I.C.S.", "F.I.G.C."];
+
+// ─── Import atleti da Excel ──────────────────────────────────────────
+// Intestazioni del modello (ordine delle colonne)
+const XLS_HEADERS = [
+  "Nome e cognome", "N° maglia", "Ruolo", "Nato il (gg/mm/aaaa)",
+  "Piede", "Altezza (cm)", "Peso (kg)", "Scarpe", "N° documento",
+  "Tessera C.S.I.", "Tessera C.S.E.N.", "Tessera A.I.C.S.", "Tessera F.I.G.C.",
+];
+
+// Scarica un file Excel modello, con intestazioni e una riga d'esempio
+function downloadPlayerTemplate() {
+  const example = {
+    "Nome e cognome": "Mario Rossi", "N° maglia": "10", "Ruolo": "Attaccante",
+    "Nato il (gg/mm/aaaa)": "15/03/2010", "Piede": "dx", "Altezza (cm)": "165",
+    "Peso (kg)": "55", "Scarpe": "40", "N° documento": "",
+    "Tessera C.S.I.": "12345", "Tessera C.S.E.N.": "", "Tessera A.I.C.S.": "",
+    "Tessera F.I.G.C.": "",
+  };
+  const ws = XLSX.utils.json_to_sheet([example], { header: XLS_HEADERS });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Atleti");
+  XLSX.writeFile(wb, "modello-atleti.xlsx");
+}
+
+// Legge un file Excel e restituisce gli atleti nel formato dell'app
+async function parsePlayersFromExcel(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  const val = (row, keys) => {
+    for (const k of keys) {
+      const found = Object.keys(row).find((kk) => kk.trim().toLowerCase() === k.toLowerCase());
+      if (found && String(row[found]).trim()) return String(row[found]).trim();
+    }
+    return "";
+  };
+  const players = [];
+  for (const row of rows) {
+    const name = val(row, ["Nome e cognome", "Nome", "Cognome e nome", "Atleta"]);
+    if (!name) continue; // salta righe senza nome
+    const cardNumbers = {};
+    const map = { "C.S.I.": ["Tessera C.S.I.", "CSI", "C.S.I."],
+      "C.S.E.N.": ["Tessera C.S.E.N.", "CSEN", "C.S.E.N."],
+      "A.I.C.S.": ["Tessera A.I.C.S.", "AICS", "A.I.C.S."],
+      "F.I.G.C.": ["Tessera F.I.G.C.", "FIGC", "F.I.G.C."] };
+    const federations = [];
+    for (const fed of FEDERATIONS) {
+      const num = val(row, map[fed]);
+      if (num) { cardNumbers[fed] = num; federations.push(fed); }
+    }
+    players.push({
+      id: uid(),
+      name,
+      number: val(row, ["N° maglia", "Numero", "N maglia", "Maglia"]),
+      role: val(row, ["Ruolo"]),
+      birth: val(row, ["Nato il (gg/mm/aaaa)", "Nato il", "Data di nascita", "Nascita"]),
+      foot: val(row, ["Piede"]),
+      height: val(row, ["Altezza (cm)", "Altezza"]),
+      weight: val(row, ["Peso (kg)", "Peso"]),
+      shoe: val(row, ["Scarpe", "N scarpe", "Numero scarpe"]),
+      idDocument: val(row, ["N° documento", "Documento", "N documento"]),
+      cardNumbers, federations,
+      status: "disponibile", statusNote: "", returnDate: "",
+      notes: "", strengths: "", goals: "",
+    });
+  }
+  return players;
+}
 
 // ─── Root: autenticazione e instradamento per ruolo ─────────────────
 export default function App() {
@@ -294,21 +364,18 @@ function TeamApp({ team, profile, onLogout, onSwitchTeam }) {
     const prev = state;
     setState(next); // aggiornamento ottimistico immediato per la UI
     try {
-      // --- ATLETI ---
+      // --- ATLETI (anagrafica condivisa) ---
+      // in squadra NON si creano atleti nuovi: si modificano (consentito ai tecnici)
+      // oppure si rimuovono dalla rosa (scollegamento, l'atleta resta in anagrafica)
       const prevP = new Map((prev.players || []).map((p) => [p.id, p]));
       const nextP = new Map((next.players || []).map((p) => [p.id, p]));
       for (const p of next.players || []) {
-        if (!prevP.has(p.id)) {
-          // nuovo (id temporaneo generato dall'app): crea e sostituisci id
-          const created = await db.addPlayer(team.id, p);
-          setState((s) => ({ ...s,
-            players: s.players.map((x) => x.id === p.id ? created : x) }));
-        } else if (JSON.stringify(prevP.get(p.id)) !== JSON.stringify(p)) {
-          await db.updatePlayer(team.id, p);
+        if (prevP.has(p.id) && JSON.stringify(prevP.get(p.id)) !== JSON.stringify(p)) {
+          await db.updateAthlete(p); // modifica in anagrafica
         }
       }
       for (const p of prev.players || [])
-        if (!nextP.has(p.id)) await db.removePlayer(p.id);
+        if (!nextP.has(p.id)) await db.removeAthleteFromTeam(team.id, p.id); // scollega
 
       // --- SEDUTE ---
       const prevS = new Map((prev.sessions || []).map((s) => [s.id, s]));
@@ -349,7 +416,18 @@ function TeamApp({ team, profile, onLogout, onSwitchTeam }) {
               setOpenPlayer(null);
             }} />
         ) : tab === "rosa" ? (
-          <Rosa state={state} persist={persist} onOpen={setOpenPlayer} />
+          <Rosa state={state} persist={persist} onOpen={setOpenPlayer}
+            teamId={team.id}
+            onLinkAthletes={async (athleteIds) => {
+              try {
+                for (const aid of athleteIds) await db.addAthleteToTeam(team.id, aid);
+                const data = await db.loadTeamData(team.id);
+                setState(data);
+              } catch (e) {
+                console.error(e);
+                alert("Non riuscito: " + (e.message || "errore"));
+              }
+            }} />
         ) : tab === "presenze" ? (
           <Presenze state={state} persist={persist} team={team} />
         ) : (
@@ -366,14 +444,16 @@ function SupervisorDashboard({ profile, onLogout }) {
   const [loaded, setLoaded] = useState(false);
   const [all, setAll] = useState(null);
   const [openTeam, setOpenTeam] = useState(null);
+  const [view, setView] = useState("squadre"); // squadre | anagrafica
   const [err, setErr] = useState("");
 
+  const reload = async () => {
+    try { setAll(await db.loadEverything()); }
+    catch (e) { setErr(e.message || String(e)); }
+  };
+
   useEffect(() => {
-    (async () => {
-      try { setAll(await db.loadEverything()); }
-      catch (e) { setErr(e.message || String(e)); }
-      setLoaded(true);
-    })();
+    (async () => { await reload(); setLoaded(true); })();
   }, []);
 
   if (!loaded) return <Splash />;
@@ -382,11 +462,12 @@ function SupervisorDashboard({ profile, onLogout }) {
       Errore nel caricamento: {err}</div></Shell>
   );
 
-  const { teams, players, sessions, profiles } = all;
-  const playersByTeam = (tid) => players.filter((p) => {
-    const raw = all.rawPlayers.find((r) => r.id === p.id);
-    return raw && raw.team_id === tid;
-  });
+  const { teams, athletes, links, sessions, profiles } = all;
+  const idsForTeam = (tid) => links.filter((l) => l.team_id === tid).map((l) => l.athlete_id);
+  const playersByTeam = (tid) => {
+    const ids = new Set(idsForTeam(tid));
+    return athletes.filter((a) => ids.has(a.id));
+  };
   const sessionsByTeam = (tid) => sessions.filter((s) => {
     const raw = all.rawSessions.find((r) => r.id === s.id);
     return raw && raw.team_id === tid;
@@ -395,6 +476,12 @@ function SupervisorDashboard({ profile, onLogout }) {
     const pr = profiles.find((p) => p.id === ownerId);
     return pr ? pr.full_name : "—";
   };
+
+  // vista ANAGRAFICA (gestione completa degli atleti della società)
+  if (view === "anagrafica") {
+    return <AnagraficaView athletes={athletes} onBack={() => setView("squadre")}
+      onLogout={onLogout} onChanged={reload} />;
+  }
 
   // vista dettaglio squadra (sola lettura)
   if (openTeam) {
@@ -460,8 +547,13 @@ function SupervisorDashboard({ profile, onLogout }) {
         <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
           <MiniStat n={profiles.filter((p) => p.role === "tecnico").length} l="Tecnici" accent={C.chalk} />
           <MiniStat n={teams.length} l="Squadre" accent={C.lime} />
-          <MiniStat n={players.length} l="Atleti" accent={C.amber} />
+          <MiniStat n={athletes.length} l="In anagrafica" accent={C.amber} />
         </div>
+
+        <button onClick={() => setView("anagrafica")}
+          style={{ ...primaryBtn, width: "100%", justifyContent: "center", marginBottom: 24 }}>
+          <Users size={18} /> Gestisci anagrafica atleti
+        </button>
 
         <SectionTitle>Tutte le squadre</SectionTitle>
         {teams.length === 0 ? (
@@ -470,7 +562,6 @@ function SupervisorDashboard({ profile, onLogout }) {
           <div style={{ display: "grid", gap: 10 }}>
             {teams.map((t) => {
               const tp = playersByTeam(t.id);
-              const ts = sessionsByTeam(t.id);
               return (
                 <button key={t.id} onClick={() => setOpenTeam(t.id)} style={rowCard}>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
@@ -490,6 +581,140 @@ function SupervisorDashboard({ profile, onLogout }) {
                 </button>
               );
             })}
+          </div>
+        )}
+      </main>
+    </Shell>
+  );
+}
+
+// ─── Anagrafica società (gestita dal supervisore) ───────────────────
+function AnagraficaView({ athletes, onBack, onLogout, onChanged }) {
+  const [q, setQ] = useState("");
+  const [name, setName] = useState("");
+  const [num, setNum] = useState("");
+  const [role, setRole] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(null); // atleta aperto in scheda
+  const fileRef = React.useRef(null);
+
+  const list = athletes.filter((a) => !q || a.name.toLowerCase().includes(q.toLowerCase()));
+
+  const addOne = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      await db.addAthlete({
+        id: uid(), name: name.trim(), number: num.trim(), role: role.trim(),
+        birth: "", foot: "", height: "", weight: "", shoe: "",
+        cardNumbers: {}, federations: [], idDocument: "",
+        status: "disponibile", statusNote: "", returnDate: "",
+        notes: "", strengths: "", goals: "",
+      });
+      setName(""); setNum(""); setRole("");
+      await onChanged();
+    } catch (e) { alert("Non riuscito: " + (e.message || "errore")); }
+    finally { setBusy(false); }
+  };
+
+  const onFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    try {
+      const parsed = await parsePlayersFromExcel(file);
+      if (parsed.length === 0) { alert("Nessun atleta trovato nel file."); return; }
+      await db.addAthletesBulk(parsed);
+      await onChanged();
+      alert(`Importati ${parsed.length} atleti in anagrafica.`);
+    } catch (e) { alert("Import non riuscito: " + (e.message || "errore")); }
+    finally { setBusy(false); }
+  };
+
+  // scheda di modifica di un atleta dell'anagrafica
+  if (editing) {
+    return (
+      <Shell>
+        <SupHeader title="Scheda anagrafica" onBack={() => setEditing(null)} onLogout={onLogout} />
+        <main style={{ maxWidth: 760, margin: "0 auto", padding: "16px 16px 60px" }}>
+          <PlayerSheet player={editing} sessions={[]}
+            onBack={() => setEditing(null)}
+            onSave={async (patch) => {
+              try { await db.updateAthlete({ ...editing, ...patch }); await onChanged(); setEditing(null); }
+              catch (e) { alert("Non riuscito: " + (e.message || "errore")); }
+            }}
+            onDelete={async () => {
+              if (!window.confirm("Eliminare definitivamente questo atleta dall'anagrafica? Verrà tolto anche da tutte le squadre.")) return;
+              try { await db.removeAthlete(editing.id); await onChanged(); setEditing(null); }
+              catch (e) { alert("Non riuscito: " + (e.message || "errore")); }
+            }}
+            supervisorMode />
+        </main>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell>
+      <SupHeader title="Anagrafica" subtitle={`${athletes.length} atleti`}
+        onBack={onBack} onLogout={onLogout} icon={<Users size={18} color={C.lime} />} />
+      <main style={{ maxWidth: 760, margin: "0 auto", padding: "20px 16px 60px" }}>
+        <SectionTitle>Importa da Excel</SectionTitle>
+        <div style={{ ...cardWrap, display: "flex", gap: 10 }}>
+          <button onClick={downloadPlayerTemplate}
+            style={{ ...outlineBtn, flex: 1, justifyContent: "center" }}>
+            <FileSpreadsheet size={17} /> Scarica modello
+          </button>
+          <button onClick={() => fileRef.current && fileRef.current.click()} disabled={busy}
+            style={{ ...primaryBtn, flex: 1, justifyContent: "center" }}>
+            <Upload size={17} /> {busy ? "Attendere…" : "Carica file"}
+          </button>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={onFile}
+            style={{ display: "none" }} />
+        </div>
+
+        <SectionTitle>Aggiungi manualmente</SectionTitle>
+        <div style={cardWrap}>
+          <input value={name} onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addOne()}
+            placeholder="Nome e cognome" style={inp} />
+          <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+            <input value={num} onChange={(e) => setNum(e.target.value)}
+              placeholder="N°" style={{ ...inp, width: 70 }} />
+            <input value={role} onChange={(e) => setRole(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addOne()}
+              placeholder="Ruolo" style={{ ...inp, flex: 1 }} />
+            <button onClick={addOne} disabled={busy} style={primaryBtn}>
+              <Plus size={18} strokeWidth={2.5} /> Aggiungi
+            </button>
+          </div>
+        </div>
+
+        <SectionTitle>Atleti in anagrafica {athletes.length > 0 && `· ${athletes.length}`}</SectionTitle>
+        <input value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="Cerca per nome…" style={{ ...inp, marginBottom: 12 }} />
+        {list.length === 0 ? (
+          <Empty icon={<Users size={26} />} text={athletes.length === 0
+            ? "Anagrafica vuota. Aggiungi gli atleti manualmente o importa da Excel."
+            : "Nessun atleta trovato con questa ricerca."} />
+        ) : (
+          <div style={{ display: "grid", gap: 8 }}>
+            {list.map((a) => (
+              <button key={a.id} onClick={() => setEditing(a)} style={{ ...rowCard, padding: "12px 14px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                  <div style={{ ...jersey, width: 34, height: 34, fontSize: 13 }}>{a.number || "–"}</div>
+                  <div style={{ textAlign: "left", minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 15 }}>{a.name}</div>
+                    <div style={{ color: C.muted, fontSize: 12 }}>
+                      {a.role || "—"}{a.federations && a.federations.length
+                        ? ` · ${a.federations.join(", ")}` : ""}
+                    </div>
+                  </div>
+                </div>
+                <ChevronLeft size={18} style={{ transform: "rotate(180deg)", color: C.muted }} />
+              </button>
+            ))}
           </div>
         )}
       </main>
@@ -554,23 +779,92 @@ function Header({ coach, team, players, sessions, onLogout, onSwitchTeam }) {
   );
 }
 
-// ─── Rosa ───────────────────────────────────────────────────────────
-function Rosa({ state, persist, onOpen }) {
-  const [name, setName] = useState("");
-  const [num, setNum] = useState("");
-  const [role, setRole] = useState("");
+// ─── Selettore dall'anagrafica (per comporre la rosa) ───────────────
+function AthletePicker({ alreadyIn, onClose, onConfirm }) {
+  const [athletes, setAthletes] = useState(null);
+  const [sel, setSel] = useState({});
+  const [q, setQ] = useState("");
 
-  const add = () => {
-    if (!name.trim()) return;
-    persist({ ...state, players: [...state.players, {
-      id: uid(), name: name.trim(), number: num.trim(), role: role.trim(),
-      birth: "", foot: "", height: "", weight: "", shoe: "",
-      cardNumbers: {}, federations: [], idDocument: "",
-      status: "disponibile", statusNote: "", returnDate: "",
-      notes: "", strengths: "", goals: "",
-    }] });
-    setName(""); setNum(""); setRole("");
-  };
+  useEffect(() => {
+    (async () => {
+      try { setAthletes(await db.listAthletes()); }
+      catch (e) { console.error(e); setAthletes([]); }
+    })();
+  }, []);
+
+  const already = new Set(alreadyIn || []);
+  const list = (athletes || []).filter((a) =>
+    !already.has(a.id) &&
+    (!q || a.name.toLowerCase().includes(q.toLowerCase())));
+  const chosen = Object.keys(sel).filter((k) => sel[k]);
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+      display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.pitch,
+        borderTop: `1px solid ${C.line}`, borderRadius: "18px 18px 0 0", width: "100%",
+        maxWidth: 760, maxHeight: "85vh", display: "flex", flexDirection: "column",
+        padding: "20px 16px calc(16px + env(safe-area-inset-bottom))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+          marginBottom: 14 }}>
+          <div style={{ fontFamily: "'Archivo', sans-serif", fontWeight: 800, fontSize: 19 }}>
+            Aggiungi dall'anagrafica
+          </div>
+          <button onClick={onClose} style={{ ...tinyBtn, width: 34, height: 34 }}><X size={17} /></button>
+        </div>
+
+        <input value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="Cerca per nome…" style={{ ...inp, marginBottom: 12 }} />
+
+        {athletes === null ? (
+          <div style={{ color: C.muted, textAlign: "center", padding: 30 }}>Carico…</div>
+        ) : list.length === 0 ? (
+          <div style={{ color: C.muted, textAlign: "center", padding: 30, fontSize: 14 }}>
+            {(athletes || []).length === 0
+              ? "L'anagrafica è vuota. Gli atleti li inserisce la società (supervisore)."
+              : "Nessun atleta disponibile da aggiungere."}
+          </div>
+        ) : (
+          <div style={{ overflowY: "auto", flex: 1, display: "grid", gap: 8, marginBottom: 14 }}>
+            {list.map((a) => {
+              const on = !!sel[a.id];
+              return (
+                <button key={a.id} onClick={() => setSel((s) => ({ ...s, [a.id]: !s[a.id] }))}
+                  style={{ display: "flex", alignItems: "center", gap: 12, background: C.surface,
+                    border: `1px solid ${on ? C.lime : C.line}`, borderRadius: 11,
+                    padding: "10px 12px", width: "100%", textAlign: "left" }}>
+                  <span style={{ width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: on ? C.lime : "transparent",
+                    border: `1px solid ${on ? C.lime : C.muted}` }}>
+                    {on && <Check size={15} strokeWidth={3} color={C.pitchDeep} />}
+                  </span>
+                  <span style={{ ...jersey, width: 32, height: 32, fontSize: 12 }}>{a.number || "–"}</span>
+                  <span style={{ minWidth: 0, flex: 1 }}>
+                    <span style={{ fontWeight: 600, fontSize: 15, display: "block",
+                      whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {a.name}</span>
+                    <span style={{ color: C.muted, fontSize: 12 }}>{a.role || "—"}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <button onClick={() => onConfirm(chosen)} disabled={chosen.length === 0}
+          style={{ ...primaryBtn, width: "100%", justifyContent: "center",
+            opacity: chosen.length === 0 ? 0.45 : 1 }}>
+          <Plus size={17} /> Aggiungi alla rosa ({chosen.length})
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Rosa ───────────────────────────────────────────────────────────
+function Rosa({ state, persist, onOpen, teamId, onLinkAthletes }) {
+  const [picker, setPicker] = useState(false);
 
   const attendanceFor = (pid) => {
     const total = state.sessions.length;
@@ -582,26 +876,21 @@ function Rosa({ state, persist, onOpen }) {
   return (
     <div style={{ paddingTop: 20 }}>
       <AbsenceAlert alerts={absenceAlerts(state.players, state.sessions)} onOpen={onOpen} />
-      <SectionTitle>Aggiungi atleta</SectionTitle>
-      <div style={cardWrap}>
-        <input value={name} onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && add()}
-          placeholder="Nome e cognome" style={inp} />
-        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-          <input value={num} onChange={(e) => setNum(e.target.value)}
-            placeholder="N°" style={{ ...inp, width: 70 }} />
-          <input value={role} onChange={(e) => setRole(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && add()}
-            placeholder="Ruolo" style={{ ...inp, flex: 1 }} />
-          <button onClick={add} style={primaryBtn}>
-            <Plus size={18} strokeWidth={2.5} /> Aggiungi
-          </button>
-        </div>
-      </div>
+      <button onClick={() => setPicker(true)}
+        style={{ ...primaryBtn, width: "100%", justifyContent: "center", marginBottom: 24 }}>
+        <Plus size={18} strokeWidth={2.5} /> Aggiungi dall'anagrafica
+      </button>
+
+      {picker && (
+        <AthletePicker
+          alreadyIn={state.players.map((p) => p.id)}
+          onClose={() => setPicker(false)}
+          onConfirm={(ids) => { setPicker(false); onLinkAthletes(ids); }} />
+      )}
 
       <SectionTitle>Rosa {state.players.length > 0 && `· ${state.players.length}`}</SectionTitle>
       {state.players.length === 0 ? (
-        <Empty icon={<Users size={26} />} text="Nessun atleta ancora. Aggiungi il primo qui sopra per costruire la rosa." />
+        <Empty icon={<Users size={26} />} text="Rosa vuota. Usa 'Aggiungi dall'anagrafica' per inserire gli atleti che ti ha assegnato la società." />
       ) : (
         <div style={{ display: "grid", gap: 10 }}>
           {state.players.map((p) => {
@@ -647,7 +936,7 @@ function Rosa({ state, persist, onOpen }) {
 }
 
 // ─── Scheda tecnica ─────────────────────────────────────────────────
-function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
+function PlayerSheet({ player, sessions, onBack, onSave, onDelete, supervisorMode }) {
   const [f, setF] = useState(() => {
     // compatibilità con vecchi dati
     const base = { ...player };
@@ -830,8 +1119,22 @@ function PlayerSheet({ player, sessions, onBack, onSave, onDelete }) {
           style={{ ...primaryBtn, flex: 1, justifyContent: "center", opacity: dirty ? 1 : 0.45 }}>
           <Save size={17} /> {dirty ? "Salva modifiche" : "Salvato"}
         </button>
-        <button onClick={onDelete} style={dangerBtn}><Trash2 size={17} /></button>
+        {supervisorMode ? (
+          <button onClick={onDelete} style={dangerBtn}><Trash2 size={17} /></button>
+        ) : (
+          <button onClick={() => {
+            if (window.confirm("Togliere questo atleta dalla rosa? Resterà nell'anagrafica della società."))
+              onDelete();
+          }} style={{ ...outlineBtn, color: C.clay, borderColor: C.line }}>
+            Togli dalla rosa
+          </button>
+        )}
       </div>
+      {!supervisorMode && (
+        <div style={{ textAlign: "center", color: C.muted, fontSize: 12, marginTop: 10 }}>
+          I dati anagrafici sono condivisi con la società. Le modifiche valgono per tutte le sue squadre.
+        </div>
+      )}
     </div>
   );
 }
